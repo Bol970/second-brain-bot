@@ -1,0 +1,6 @@
+TELEGRAM_BOT_TOKEN="put-telegram-token-here"
+TELEGRAM_WEBHOOK_SECRET="generate-a-long-random-webhook-secret"
+OWNER_TELEGRAM_ID="put-your-telegram-user-id-here"
+TAVILY_API_KEY="put-tavily-key-here"
+OPENROUTER_API_KEY="put-openrouter-key-here"
+OPENROUTER_MODEL="put-openrouter-model-id-here"

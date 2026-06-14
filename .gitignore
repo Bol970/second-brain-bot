@@ -1,0 +1,17 @@
+.dev.vars
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+.git/
+.agents/
+.codex/
+.wrangler/
+.wrangler-r2-dry-run/
+node_modules/
+dist/
+*.log
+wrangler.jsonc
+wrangler.r2.jsonc
+scripts/worker-metadata.json
+scripts/worker-metadata.r2.json

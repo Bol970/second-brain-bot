@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "<WORKER_NAME>",
+  "main": "src/index.js",
+  "compatibility_date": "<WORKER_COMPATIBILITY_DATE>",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": [
+      "*/15 * * * *"
+    ]
+  },
+  "vars": {
+    "BOT_DISPLAY_NAME": "<BOT_DISPLAY_NAME>"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "second_brain",
+      "database_id": "<D1_DATABASE_ID>"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "<R2_BUCKET_NAME>"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "second-brain-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:direct": "node scripts/deploy-direct.mjs",
+    "config:render": "node scripts/render-config.mjs",
+    "db:migrate:local": "wrangler d1 migrations apply second_brain --local",
+    "db:migrate:remote": "wrangler d1 migrations apply second_brain --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
