@@ -1,93 +1,93 @@
-# Second Brain Telegram Bot
+# Telegram-Бот Second Brain
 
-Telegram bot on Cloudflare Workers with D1 and optional R2 media storage. It stores thoughts, links, films, recipes, tasks, reminders, and images, enriches links with Tavily Extract, and uses OpenRouter for classification, summaries, tags, and answer generation.
+Telegram-бот на Cloudflare Workers с D1 и опциональным R2-хранилищем для медиа. Он сохраняет мысли, ссылки, фильмы, рецепты, задачи, напоминания и изображения, обогащает ссылки через Tavily Extract и использует OpenRouter для классификации, кратких описаний, тегов и генерации ответов.
 
-## Current Architecture
+## Текущая Архитектура
 
-- Worker handles the Telegram webhook and only accepts messages from `OWNER_TELEGRAM_ID`.
-- D1 stores items, tags, chunks, reminders/tasks, attachments metadata, and interaction logs.
-- Access is restricted by `OWNER_TELEGRAM_ID`; the owner can manage additional Telegram IDs from inside the bot.
-- R2 stores media bytes. D1 stores only the R2 key and metadata.
-- Tavily Extract reads linked pages and returns clean page content. Tavily Search is used only when you explicitly ask for web search.
-- OpenRouter is optional but recommended. It classifies notes, extracts task dates, prepares summaries/tags, and answers from retrieved context. Without it, the bot uses simple heuristics.
-- Images are kept under control by choosing Telegram's resized photo variant first. On Cloudflare, the Worker also tries `cf.image` resizing before writing to R2; if that fails, it stores the selected Telegram variant.
+- Worker принимает Telegram webhook и обрабатывает сообщения только от `OWNER_TELEGRAM_ID` и разрешённых Telegram ID.
+- D1 хранит записи, теги, чанки, задачи/напоминания, метаданные вложений и журнал взаимодействий.
+- Доступ ограничен через `OWNER_TELEGRAM_ID`; владелец может добавлять и удалять дополнительные Telegram ID прямо из бота.
+- R2 хранит байты медиафайлов. В D1 сохраняются только ключ R2 и метаданные.
+- Tavily Extract извлекает чистое содержимое страниц по ссылкам. Tavily Search используется только по явной просьбе искать в интернете.
+- OpenRouter опционален, но рекомендован. Он классифицирует заметки, извлекает даты задач, готовит краткие описания и теги, а также отвечает по найденному контексту. Без него бот использует простые эвристики.
+- Изображения контролируются по размеру: бот сначала выбирает Telegram-вариант фото с уже уменьшенным размером. На Cloudflare Worker также пробует resize через `cf.image` перед записью в R2; если это не сработало, сохраняет выбранный Telegram-вариант.
 
-## Deployment Values
+## Значения Для Деплоя
 
-This repository is safe to keep public: real tokens are not committed, and account-specific deployment values should live in local environment variables or ignored local config files.
+Репозиторий можно держать публичным: реальные токены не коммитятся, а значения, привязанные к конкретному аккаунту, должны лежать в локальных env-переменных или игнорируемых локальных конфигах.
 
-- Worker URL: `TELEGRAM_WEBHOOK_URL`
-- Telegram webhook path: `/telegram/webhook`
-- D1 database ID: `D1_DATABASE_ID`
-- R2 bucket name: `R2_BUCKET_NAME`
-- Worker R2 binding: `MEDIA`
-- OpenRouter enrichment is active when `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are set as Cloudflare Secrets.
+- URL Worker: `TELEGRAM_WEBHOOK_URL`
+- Путь Telegram webhook: `/telegram/webhook`
+- ID D1 database: `D1_DATABASE_ID`
+- Имя R2 bucket: `R2_BUCKET_NAME`
+- R2 binding для Worker: `MEDIA`
+- OpenRouter включается, когда `OPENROUTER_API_KEY` и `OPENROUTER_MODEL` заданы как Cloudflare Secrets.
 
-## Cloudflare Fit
+## Как Это Ложится На Cloudflare
 
-- Workers Free is enough for a private Telegram webhook if usage stays below typical personal limits.
-- D1 Free is enough for text notes and extracted pages if this stays a private bot. Raw page extracts are kept by default up to the Worker safety cap, and `/compact` can later remove raw text while keeping summary/chunks.
-- R2 is the right place for images and documents, but it is a metered product with included free monthly usage. Keep an eye on R2 usage if images become heavy.
-- Cloudflare Images Free can help transform images, but the MVP does not depend on paid Images storage.
+- Workers Free достаточно для приватного Telegram webhook, если личное использование остаётся в обычных пределах.
+- D1 Free достаточно для текстовых заметок и извлечённых страниц в личном боте. Raw extracts сохраняются по умолчанию до защитного лимита Worker, а `/compact` позже может удалить raw text, оставив summary/chunks.
+- R2 хорошо подходит для изображений и документов, но это продукт с тарификацией сверх включённого бесплатного месячного лимита. Если картинок станет много, стоит следить за использованием R2.
+- Cloudflare Images Free может помочь с трансформацией изображений, но MVP не зависит от платного хранилища Cloudflare Images.
 
-## Bot Commands
+## Команды Бота
 
-- `/start` or `/help` - short usage hint.
-- `/recent` - latest saved items.
-- `/stats` - storage counters.
-- `/search query` - search saved notes.
-- `/ask question` - answer from saved notes.
-- `/movie title` - save a film or series recommendation.
-- `/recipe text` - save a recipe.
-- `/note text` - save a thought.
-- `/task text` - save a task.
-- `/remind when + text` - save a reminder/task with a due date.
-- `/reminders` - list active tasks and reminders.
-- `/done item_id_prefix` - mark a task/reminder done.
-- `/id` - show your Telegram ID.
-- `/allow telegram_id [note]` - grant bot access to another Telegram user. Owner only.
-- `/deny telegram_id` - revoke bot access. Owner only.
-- `/access` - list allowed Telegram users. Owner only.
-- `/web query` - explicit internet search through Tavily Search.
-- `/compact item_id_prefix` - delete a saved link's long raw extract while keeping summary/chunks.
-- `/delete item_id_prefix` - archive an item.
+- `/start` или `/help` - короткая подсказка.
+- `/recent` - последние сохранённые записи.
+- `/stats` - счётчики хранилища.
+- `/search query` - поиск по сохранённым заметкам.
+- `/ask question` - ответ по сохранённым заметкам.
+- `/movie title` - сохранить фильм или сериал.
+- `/recipe text` - сохранить рецепт.
+- `/note text` - сохранить мысль.
+- `/task text` - сохранить задачу.
+- `/remind when + text` - сохранить задачу/напоминание с датой.
+- `/reminders` - список активных задач и напоминаний.
+- `/done item_id_prefix` - отметить задачу/напоминание выполненным.
+- `/id` - показать твой Telegram ID.
+- `/allow telegram_id [note]` - выдать доступ другому Telegram-пользователю. Только владелец.
+- `/deny telegram_id` - отозвать доступ. Только владелец.
+- `/access` - список пользователей с доступом. Только владелец.
+- `/web query` - явный интернет-поиск через Tavily Search.
+- `/compact item_id_prefix` - удалить длинный raw extract у сохранённой ссылки, оставив summary/chunks.
+- `/delete item_id_prefix` - архивировать запись.
 
-Natural language also works. Send a plain thought to save it. Send a URL to extract and save the page. Ask things like "что посмотреть сегодня вечером" to search only through saved films and recommendations. The bot searches the web only when the request explicitly says to search the internet, or when you use `/web`.
+Естественный язык тоже работает. Можно отправить обычную мысль, и бот сохранит её. Можно отправить URL, и бот извлечёт и сохранит страницу. Можно спросить: «что посмотреть сегодня вечером» - бот будет искать только по сохранённым фильмам и рекомендациям. Интернет-поиск включается только если прямо попросить искать в интернете или использовать `/web`.
 
-## Setup With Wrangler
+## Настройка Через Wrangler
 
-Install Node.js and run:
+Установи Node.js и запусти:
 
 ```bash
 npm install
 ```
 
-Create resources:
+Создай ресурсы:
 
 ```bash
 npx wrangler d1 create second_brain
 npx wrangler r2 bucket create "$R2_BUCKET_NAME"
 ```
 
-If R2 is not enabled on the Cloudflare account yet, deploy with `wrangler.jsonc` first. After R2 is enabled and the bucket exists, deploy with `wrangler.r2.jsonc`.
+Если R2 ещё не включён на Cloudflare account, сначала деплой через `wrangler.jsonc`. После включения R2 и создания bucket можно деплоить через `wrangler.r2.jsonc`.
 
-Create local config from environment variables:
+Создай локальный конфиг из env-переменных:
 
 ```bash
 cp .env.example .env
-# Fill .env. The scripts load it automatically.
+# Заполни .env. Скрипты загрузят его автоматически.
 npm run config:render
 ```
 
-The generated `wrangler.jsonc` and `wrangler.r2.jsonc` files are ignored by git.
+Сгенерированные `wrangler.jsonc` и `wrangler.r2.jsonc` игнорируются git.
 
-Run migrations:
+Примени миграции:
 
 ```bash
 npx wrangler d1 migrations apply second_brain --remote
 ```
 
-Set secrets:
+Задай secrets:
 
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -98,26 +98,26 @@ npx wrangler secret put OPENROUTER_API_KEY
 npx wrangler secret put OPENROUTER_MODEL
 ```
 
-Deploy D1-only:
+Деплой только с D1:
 
 ```bash
 npx wrangler deploy
 ```
 
-Deploy with R2:
+Деплой с R2:
 
 ```bash
 npx wrangler r2 bucket create "$R2_BUCKET_NAME"
 npx wrangler deploy --config wrangler.r2.jsonc
 ```
 
-If Wrangler deploy hangs in your environment, use the direct API deploy script:
+Если `wrangler deploy` зависает в твоём окружении, используй скрипт прямого деплоя через API:
 
 ```bash
 npm run deploy:direct
 ```
 
-Set Telegram webhook:
+Настрой Telegram webhook:
 
 ```bash
 curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
@@ -125,6 +125,6 @@ curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d "{\"url\":\"$TELEGRAM_WEBHOOK_URL\",\"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\"}"
 ```
 
-## Important Security Note
+## Важное Про Безопасность
 
-Do not commit real API keys. Use Cloudflare Secrets for bot tokens, Tavily, and OpenRouter. If a token was pasted into a chat or log, rotate it after setup.
+Не коммить реальные API-ключи. Используй Cloudflare Secrets для Telegram bot token, Tavily и OpenRouter. Если токен был вставлен в чат или лог, после настройки его лучше перевыпустить.

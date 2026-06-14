@@ -1,92 +1,92 @@
-# Architecture Notes
+# Заметки По Архитектуре
 
-## Capture Flow
+## Поток Сохранения
 
-1. Telegram sends an update to `/telegram/webhook`.
-2. Worker validates `X-Telegram-Bot-Api-Secret-Token`.
-3. Worker checks that the sender is `OWNER_TELEGRAM_ID` or is active in the D1 `access_users` allowlist.
-4. Text is classified as save/search/command. Links go through Tavily Extract. Explicit web-search requests go through Tavily Search.
-5. OpenRouter enriches saved content with title, summary, type, tags, entities, reminder dates, and importance.
-6. D1 stores the searchable record. R2 stores media.
-7. The bot replies in Telegram with the saved item ID or an answer.
+1. Telegram отправляет update на `/telegram/webhook`.
+2. Worker проверяет `X-Telegram-Bot-Api-Secret-Token`.
+3. Worker проверяет, что отправитель совпадает с `OWNER_TELEGRAM_ID` или активен в списке доступа D1 `access_users`.
+4. Текст классифицируется как сохранение, поиск или команда. Ссылки проходят через Tavily Extract. Явные запросы на интернет-поиск идут через Tavily Search.
+5. OpenRouter обогащает сохранённый контент: заголовок, краткое описание, тип, теги, сущности, даты напоминаний и важность.
+6. D1 хранит поисковую запись. R2 хранит медиафайлы.
+7. Бот отвечает в Telegram: возвращает ID сохранённой записи или ответ на вопрос.
 
-## Item Types
+## Типы Записей
 
-- `thought` - free-form thoughts and notes.
-- `link` - pages saved from URLs.
-- `movie` - films, series, documentaries, and watch ideas.
-- `recipe` - recipes and cooking ideas.
-- `image` - photos with optional captions.
-- `book` - books and articles to read.
-- `place` - places to visit.
-- `task` - follow-up actions.
-- `quote` - quotes.
-- `other` - fallback.
+- `thought` - свободные мысли и заметки.
+- `link` - страницы, сохранённые из URL.
+- `movie` - фильмы, сериалы, документалки и идеи «что посмотреть».
+- `recipe` - рецепты и идеи для готовки.
+- `image` - фото с необязательной подписью.
+- `book` - книги и статьи для чтения.
+- `place` - места, куда стоит сходить или поехать.
+- `task` - действия и задачи на потом.
+- `quote` - цитаты.
+- `other` - резервный тип.
 
-## Search Strategy
+## Стратегия Поиска
 
-Default search is hybrid without a separate vector database:
+Поиск по умолчанию гибридный, без отдельной векторной базы:
 
-1. Parse the user query into keywords and likely item types.
-2. Search D1 text fields and tags with bounded `LIKE` patterns.
-3. Pull matching chunks for context.
-4. Ask OpenRouter to answer using only the retrieved items.
+1. Разобрать запрос пользователя на ключевые слова и вероятные типы записей.
+2. Искать по текстовым полям D1 и тегам через ограниченные `LIKE`-паттерны.
+3. Подтянуть релевантные chunks как контекст.
+4. Попросить OpenRouter ответить, используя только найденные записи.
 
-The bot does not browse the internet for ordinary questions. If the local D1 search has no match, it suggests an explicit internet search instead. Internet search runs only when the message says something like "поищи в интернете" or uses `/web`.
+Бот не ходит в интернет для обычных вопросов. Если локальный поиск в D1 ничего не нашёл, бот предлагает явный интернет-поиск. Интернет-поиск запускается только если сообщение содержит фразу вроде «поищи в интернете» или используется `/web`.
 
-This avoids Cloudflare Vectorize and embedding costs at the start. A later upgrade can add Vectorize when semantic search becomes necessary.
+Такой подход позволяет начать без Cloudflare Vectorize и расходов на embeddings. Позже можно добавить Vectorize, если архив станет слишком большим для лексического поиска и поиска по тегам.
 
-## Raw Extract Strategy
+## Стратегия Raw Extracts
 
-Linked pages keep long `raw_content` by default, bounded by a Worker/D1 safety cap. Search uses a smaller `search_text` projection and fixed-size chunks, so large raw extracts do not have to be scanned in full for every question.
+Сохранённые страницы по умолчанию держат длинный `raw_content`, ограниченный защитным лимитом Worker/D1. Для поиска используется более компактная проекция `search_text` и фиксированные chunks, поэтому большие raw extracts не нужно сканировать целиком при каждом вопросе.
 
-If a saved page becomes too heavy, `/compact id` removes only `raw_content`. The record keeps its title, body, summary, tags, and chunks, so it remains searchable and useful for answers.
+Если сохранённая страница стала слишком тяжёлой, `/compact id` удаляет только `raw_content`. Запись сохраняет title, body, summary, tags и chunks, поэтому остаётся доступной для поиска и ответов.
 
-## Tasks And Reminders
+## Задачи И Напоминания
 
-Tasks are normal `items` with type `task`, plus a row in `reminders` for status and optional `due_at`.
+Задачи - это обычные `items` с типом `task` плюс строка в `reminders` для статуса и необязательного `due_at`.
 
-- `/task` saves a pending task with no due date.
-- `/remind` asks for a due date if it cannot extract one.
-- `/reminders` lists active tasks and reminders.
-- `/done` marks a task/reminder as done.
+- `/task` сохраняет активную задачу без даты.
+- `/remind` спрашивает дату, если не может извлечь её из сообщения.
+- `/reminders` показывает активные задачи и напоминания.
+- `/done` отмечает задачу/напоминание выполненным.
 
-The Worker includes a `scheduled` handler that sends due reminders and marks them as sent. A Cloudflare cron trigger can call it every few minutes.
+Worker содержит `scheduled` handler, который отправляет наступившие напоминания и помечает их как отправленные. Cloudflare cron trigger может вызывать его каждые несколько минут.
 
-## Access Control
+## Контроль Доступа
 
-`OWNER_TELEGRAM_ID` is the root owner and always has access. The owner can manage additional Telegram users from inside Telegram:
+`OWNER_TELEGRAM_ID` - главный владелец, у него всегда есть доступ. Владелец может управлять дополнительными Telegram-пользователями прямо из Telegram:
 
-- `/id` shows the sender's Telegram ID.
-- `/allow telegram_id [note]` grants access.
-- `/deny telegram_id` revokes access.
-- `/access` lists active allowed users.
+- `/id` показывает Telegram ID отправителя.
+- `/allow telegram_id [note]` выдаёт доступ.
+- `/deny telegram_id` отзывает доступ.
+- `/access` показывает активных пользователей с доступом.
 
-Additional allowed users write into the same second-brain database owner namespace. They cannot manage the allowlist unless they are the root owner.
+Дополнительные пользователи пишут в тот же namespace владельца в базе second brain. Они не могут управлять списком доступа, если не являются главным владельцем.
 
-## Media Strategy
+## Стратегия Медиа
 
-For Telegram photos, Telegram already gives multiple resized variants. The bot chooses the largest variant below the configured target size instead of storing the full original. On Cloudflare it then tries an image transformation with `cf.image` before saving to R2.
+Для фотографий Telegram уже отдаёт несколько вариантов разного размера. Бот выбирает самый большой вариант ниже целевого размера вместо сохранения полного оригинала. На Cloudflare он затем пробует трансформацию изображения через `cf.image` перед сохранением в R2.
 
-R2 setup values are local deployment configuration:
+Значения настройки R2 являются локальной конфигурацией деплоя:
 
 - bucket: `R2_BUCKET_NAME`
-- Worker binding: `MEDIA`
-- D1 stores only the R2 key and attachment metadata.
+- binding Worker: `MEDIA`
+- D1 хранит только ключ R2 и метаданные вложения.
 
-Default target:
+Целевые значения по умолчанию:
 
-- max dimension: 1280 px
-- JPEG quality hint: 82
-- max accepted media bytes: 8 MB
+- максимальная сторона: 1280 px
+- подсказка качества JPEG: 82
+- максимальный размер принятого media-файла: 8 MB
 
-Documents are stored only if they are image-like and below the configured size cap.
+Документы сохраняются только если они похожи на изображения и ниже настроенного лимита размера.
 
-## Decisions
+## Принятые Решения
 
-- Ordinary questions search only saved data.
-- Explicit internet search is allowed through Tavily Search.
-- Ambiguous saves can ask a clarifying question.
-- Tasks/reminders live in the same bot.
-- Long raw extracts are kept by default and compacted only on request.
-- R2 media storage is enabled, but it should be monitored because R2 is metered after included free usage.
+- Обычные вопросы ищут только по сохранённым данным.
+- Явный интернет-поиск разрешён через Tavily Search.
+- Для неоднозначных сохранений бот может задавать уточняющий вопрос.
+- Задачи/напоминания живут в том же боте.
+- Длинные raw extracts сохраняются по умолчанию и сжимаются только по отдельной команде.
+- R2-хранилище медиа включено, но за ним нужно следить: сверх включённого бесплатного лимита R2 тарифицируется.
