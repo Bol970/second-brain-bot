@@ -4,7 +4,7 @@
 
 1. Telegram sends an update to `/telegram/webhook`.
 2. Worker validates `X-Telegram-Bot-Api-Secret-Token`.
-3. Worker checks that the sender matches `OWNER_TELEGRAM_ID`.
+3. Worker checks that the sender is `OWNER_TELEGRAM_ID` or is active in the D1 `access_users` allowlist.
 4. Text is classified as save/search/command. Links go through Tavily Extract. Explicit web-search requests go through Tavily Search.
 5. OpenRouter enriches saved content with title, summary, type, tags, entities, reminder dates, and importance.
 6. D1 stores the searchable record. R2 stores media.
@@ -52,6 +52,17 @@ Tasks are normal `items` with type `task`, plus a row in `reminders` for status 
 - `/done` marks a task/reminder as done.
 
 The Worker includes a `scheduled` handler that sends due reminders and marks them as sent. A Cloudflare cron trigger can call it every few minutes.
+
+## Access Control
+
+`OWNER_TELEGRAM_ID` is the root owner and always has access. The owner can manage additional Telegram users from inside Telegram:
+
+- `/id` shows the sender's Telegram ID.
+- `/allow telegram_id [note]` grants access.
+- `/deny telegram_id` revokes access.
+- `/access` lists active allowed users.
+
+Additional allowed users write into the same second-brain database owner namespace. They cannot manage the allowlist unless they are the root owner.
 
 ## Media Strategy
 

@@ -6,6 +6,7 @@ Telegram bot on Cloudflare Workers with D1 and optional R2 media storage. It sto
 
 - Worker handles the Telegram webhook and only accepts messages from `OWNER_TELEGRAM_ID`.
 - D1 stores items, tags, chunks, reminders/tasks, attachments metadata, and interaction logs.
+- Access is restricted by `OWNER_TELEGRAM_ID`; the owner can manage additional Telegram IDs from inside the bot.
 - R2 stores media bytes. D1 stores only the R2 key and metadata.
 - Tavily Extract reads linked pages and returns clean page content. Tavily Search is used only when you explicitly ask for web search.
 - OpenRouter is optional but recommended. It classifies notes, extracts task dates, prepares summaries/tags, and answers from retrieved context. Without it, the bot uses simple heuristics.
@@ -43,6 +44,10 @@ This repository is safe to keep public: real tokens are not committed, and accou
 - `/remind when + text` - save a reminder/task with a due date.
 - `/reminders` - list active tasks and reminders.
 - `/done item_id_prefix` - mark a task/reminder done.
+- `/id` - show your Telegram ID.
+- `/allow telegram_id [note]` - grant bot access to another Telegram user. Owner only.
+- `/deny telegram_id` - revoke bot access. Owner only.
+- `/access` - list allowed Telegram users. Owner only.
 - `/web query` - explicit internet search through Tavily Search.
 - `/compact item_id_prefix` - delete a saved link's long raw extract while keeping summary/chunks.
 - `/delete item_id_prefix` - archive an item.

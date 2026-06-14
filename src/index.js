@@ -85,42 +85,49 @@ async function processTelegramUpdate(update, env) {
 
   if (!chatId || !senderId) return;
 
-  if (ownerId && senderId !== ownerId) {
-    await sendMessage(env, chatId, "Бот закрыт для личного использования.");
+  const authorized = await isAuthorizedTelegramUser(env, ownerId, senderId);
+  if (ownerId && !authorized) {
+    await sendMessage(env, chatId, `Бот закрыт для личного использования.\nТвой Telegram ID: ${senderId}`);
     return;
   }
 
-  await logInteraction(env, ownerId || senderId, message, "inbound", "telegram_message", {
+  const storageOwnerId = ownerId || senderId;
+  const access = {
+    actorId: senderId,
+    isOwner: Boolean(ownerId && senderId === ownerId)
+  };
+
+  await logInteraction(env, storageOwnerId, message, "inbound", "telegram_message", {
     text: message.text || message.caption || "",
     has_photo: Boolean(message.photo),
     has_document: Boolean(message.document)
   });
 
   if (message.text) {
-    await handleTextMessage(env, ownerId || senderId, chatId, message);
+    await handleTextMessage(env, storageOwnerId, chatId, message, access);
     return;
   }
 
   if (message.photo?.length) {
-    await handlePhotoMessage(env, ownerId || senderId, chatId, message);
+    await handlePhotoMessage(env, storageOwnerId, chatId, message);
     return;
   }
 
   if (message.document && String(message.document.mime_type || "").startsWith("image/")) {
-    await handleImageDocumentMessage(env, ownerId || senderId, chatId, message);
+    await handleImageDocumentMessage(env, storageOwnerId, chatId, message);
     return;
   }
 
   await sendMessage(env, chatId, "Пока я умею сохранять текст, ссылки и картинки. Этот формат ещё не поддержан.");
 }
 
-async function handleTextMessage(env, ownerId, chatId, message) {
+async function handleTextMessage(env, ownerId, chatId, message, access = {}) {
   const text = message.text.trim();
   if (!text) return;
 
   const command = parseCommand(text);
   if (command) {
-    await handleCommand(env, ownerId, chatId, message, command);
+    await handleCommand(env, ownerId, chatId, message, command, access);
     return;
   }
 
@@ -152,12 +159,32 @@ async function handleTextMessage(env, ownerId, chatId, message) {
   await saveTextItem(env, ownerId, chatId, message, text, classification);
 }
 
-async function handleCommand(env, ownerId, chatId, message, command) {
+async function handleCommand(env, ownerId, chatId, message, command, access = {}) {
   const name = command.name;
   const arg = command.arg.trim();
 
   if (name === "start" || name === "help") {
     await sendHelp(env, chatId);
+    return;
+  }
+
+  if (name === "id" || name === "whoami") {
+    await sendMessage(env, chatId, `Твой Telegram ID: ${access.actorId || message.from?.id || "неизвестен"}`);
+    return;
+  }
+
+  if (name === "allow" || name === "adduser") {
+    await addAccessUser(env, ownerId, chatId, message, arg, access);
+    return;
+  }
+
+  if (name === "deny" || name === "removeuser" || name === "revoke") {
+    await removeAccessUser(env, ownerId, chatId, message, arg, access);
+    return;
+  }
+
+  if (name === "access" || name === "users") {
+    await sendAccessUsers(env, ownerId, chatId, access);
     return;
   }
 
@@ -269,6 +296,10 @@ async function sendHelp(env, chatId) {
     "/remind когда + что - сохранить напоминание",
     "/reminders - активные задачи и напоминания",
     "/done id - отметить задачу выполненной",
+    "/id - показать твой Telegram ID",
+    "/allow telegram_id [заметка] - добавить доступ",
+    "/deny telegram_id - удалить доступ",
+    "/access - список доступа",
     "/search запрос - поиск",
     "/ask вопрос - ответ по базе",
     "/web запрос - поискать в интернете через Tavily",
@@ -883,6 +914,140 @@ async function insertAttachment(env, input) {
   ).run();
 }
 
+async function isAuthorizedTelegramUser(env, ownerId, senderId) {
+  if (!ownerId) return true;
+  if (senderId === ownerId) return true;
+  if (!env.DB) return false;
+
+  try {
+    const row = await env.DB.prepare(`
+      SELECT telegram_id
+      FROM access_users
+      WHERE owner_id = ? AND telegram_id = ? AND status = 'active'
+      LIMIT 1
+    `).bind(ownerId, senderId).first();
+    return Boolean(row?.telegram_id);
+  } catch (error) {
+    console.error("failed to check telegram access", error);
+    return false;
+  }
+}
+
+async function addAccessUser(env, ownerId, chatId, message, arg, access) {
+  if (!(await ensureAccessAdmin(env, ownerId, chatId, access))) return;
+
+  const parsed = parseTelegramUserTarget(arg, message);
+  if (!parsed.telegramId) {
+    await sendMessage(env, chatId, "Укажи Telegram ID: /allow 123456789 Иван");
+    return;
+  }
+
+  if (parsed.telegramId === ownerId) {
+    await sendMessage(env, chatId, "OWNER_TELEGRAM_ID уже всегда имеет доступ.");
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO access_users (
+      owner_id, telegram_id, status, note, added_by, created_at, updated_at
+    ) VALUES (?, ?, 'active', ?, ?, ?, ?)
+    ON CONFLICT(owner_id, telegram_id) DO UPDATE SET
+      status = 'active',
+      note = excluded.note,
+      added_by = excluded.added_by,
+      updated_at = excluded.updated_at
+  `).bind(
+    ownerId,
+    parsed.telegramId,
+    parsed.note || null,
+    access.actorId || null,
+    now,
+    now
+  ).run();
+
+  await sendMessage(env, chatId, `Добавил доступ для Telegram ID: ${parsed.telegramId}${parsed.note ? `\nЗаметка: ${parsed.note}` : ""}`);
+}
+
+async function removeAccessUser(env, ownerId, chatId, message, arg, access) {
+  if (!(await ensureAccessAdmin(env, ownerId, chatId, access))) return;
+
+  const parsed = parseTelegramUserTarget(arg, message);
+  if (!parsed.telegramId) {
+    await sendMessage(env, chatId, "Укажи Telegram ID: /deny 123456789");
+    return;
+  }
+
+  if (parsed.telegramId === ownerId) {
+    await sendMessage(env, chatId, "Нельзя удалить OWNER_TELEGRAM_ID. Он задан в Cloudflare Secret.");
+    return;
+  }
+
+  const row = await env.DB.prepare(`
+    SELECT telegram_id, status
+    FROM access_users
+    WHERE owner_id = ? AND telegram_id = ?
+    LIMIT 1
+  `).bind(ownerId, parsed.telegramId).first();
+
+  if (!row?.telegram_id || row.status !== "active") {
+    await sendMessage(env, chatId, "Такого активного Telegram ID в списке доступа нет.");
+    return;
+  }
+
+  await env.DB.prepare(`
+    UPDATE access_users
+    SET status = 'revoked', updated_at = ?
+    WHERE owner_id = ? AND telegram_id = ?
+  `).bind(new Date().toISOString(), ownerId, parsed.telegramId).run();
+
+  await sendMessage(env, chatId, `Удалил доступ для Telegram ID: ${parsed.telegramId}`);
+}
+
+async function sendAccessUsers(env, ownerId, chatId, access) {
+  if (!(await ensureAccessAdmin(env, ownerId, chatId, access))) return;
+
+  const result = await env.DB.prepare(`
+    SELECT telegram_id, note, added_by, created_at, updated_at
+    FROM access_users
+    WHERE owner_id = ? AND status = 'active'
+    ORDER BY created_at ASC
+    LIMIT 50
+  `).bind(ownerId).all();
+
+  const rows = result.results || [];
+  const lines = [
+    `- ${ownerId} - владелец из OWNER_TELEGRAM_ID`
+  ];
+
+  for (const row of rows) {
+    const note = row.note ? ` - ${row.note}` : "";
+    const addedBy = row.added_by ? `; добавил: ${row.added_by}` : "";
+    lines.push(`- ${row.telegram_id}${note}${addedBy}`);
+  }
+
+  await sendLongMessage(env, chatId, `Доступ к боту:\n\n${lines.join("\n")}`);
+}
+
+async function ensureAccessAdmin(env, ownerId, chatId, access) {
+  if (!ownerId) {
+    await sendMessage(env, chatId, "Сначала настрой OWNER_TELEGRAM_ID в Cloudflare Secrets.");
+    return false;
+  }
+
+  if (!access.isOwner) {
+    await sendMessage(env, chatId, "Управлять доступом может только владелец из OWNER_TELEGRAM_ID.");
+    return false;
+  }
+
+  if (!env.DB) {
+    await sendMessage(env, chatId, "D1 база не подключена, список доступа недоступен.");
+    return false;
+  }
+
+  return true;
+}
+
 async function createReminder(env, input) {
   const id = input.id || newId("rem");
   const now = new Date().toISOString();
@@ -1022,8 +1187,13 @@ async function processDueReminders(env) {
 
   for (const row of result.results || []) {
     if (!row.telegram_chat_id) continue;
+    const targetChatId = String(row.telegram_chat_id);
+    if (!targetChatId.startsWith("-") && !(await isAuthorizedTelegramUser(env, String(row.owner_id || ""), targetChatId))) {
+      continue;
+    }
+
     try {
-      await sendMessage(env, row.telegram_chat_id, `Напоминание:\n${row.text}\n\nid: ${shortId(row.id)}`);
+      await sendMessage(env, targetChatId, `Напоминание:\n${row.text}\n\nid: ${shortId(row.id)}`);
       await env.DB.prepare(`
         UPDATE reminders SET sent_at = ?, updated_at = ? WHERE id = ?
       `).bind(now, now, row.id).run();
@@ -1559,6 +1729,35 @@ function parseCommand(text) {
     name: match[1].toLowerCase(),
     arg: match[2] || ""
   };
+}
+
+function parseTelegramUserTarget(arg, message) {
+  const clean = String(arg || "").trim();
+  const idMatch = clean.match(/\b(\d{3,20})\b/);
+  if (idMatch) {
+    return {
+      telegramId: idMatch[1],
+      note: clean.replace(idMatch[0], "").trim()
+    };
+  }
+
+  const replyUserId = message.reply_to_message?.from?.id;
+  if (replyUserId) {
+    return {
+      telegramId: String(replyUserId),
+      note: clean
+    };
+  }
+
+  const forwardedUserId = message.forward_from?.id || message.forward_origin?.sender_user?.id;
+  if (forwardedUserId) {
+    return {
+      telegramId: String(forwardedUserId),
+      note: clean
+    };
+  }
+
+  return { telegramId: "", note: clean };
 }
 
 function fallbackClassifyText(text) {
