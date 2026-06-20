@@ -3,9 +3,11 @@ const MAX_AI_INPUT_CHARS = 14000;
 const MAX_SEARCH_TEXT_CHARS = 60000;
 const MAX_CHUNK_CHARS = 1200;
 const MAX_CHUNKS_PER_ITEM = 24;
+const MAX_VECTOR_CHUNKS_PER_BATCH = 24;
 const MAX_MEDIA_BYTES = 8 * 1024 * 1024;
 const IMAGE_TARGET_PX = 1280;
 const TELEGRAM_TEXT_LIMIT = 3900;
+const DEFAULT_EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 
 const TYPE_LABELS = {
   thought: "мысль",
@@ -225,13 +227,12 @@ async function handleCommand(env, ownerId, chatId, message, command, access = {}
   }
 
   if (name === "movie") {
-    await saveTextItem(env, ownerId, chatId, message, arg, {
-      intent: "save",
-      type: "movie",
-      title: titleFromText(arg),
-      body: arg,
-      tags: ["кино", "посмотреть"]
-    });
+    await saveMovieItem(env, ownerId, chatId, message, arg);
+    return;
+  }
+
+  if (name === "book") {
+    await saveBookItem(env, ownerId, chatId, message, arg);
     return;
   }
 
@@ -276,6 +277,11 @@ async function handleCommand(env, ownerId, chatId, message, command, access = {}
     return;
   }
 
+  if (name === "rag") {
+    await handleRagCommand(env, ownerId, chatId, arg);
+    return;
+  }
+
   await sendMessage(env, chatId, "Не знаю такую команду. Напиши /help.");
 }
 
@@ -291,6 +297,7 @@ async function sendHelp(env, chatId) {
     "Команды:",
     "/note текст - сохранить мысль",
     "/movie название - сохранить фильм или сериал",
+    "/book название - найти книгу в Open Library и сохранить",
     "/recipe текст - сохранить рецепт",
     "/task текст - сохранить задачу",
     "/remind когда + что - сохранить напоминание",
@@ -305,6 +312,8 @@ async function sendHelp(env, chatId) {
     "/web запрос - поискать в интернете через Tavily",
     "/recent - последние записи",
     "/stats - статистика",
+    "/rag status - состояние RAG-индекса",
+    "/rag reindex [число] - доиндексировать чанки",
     "/compact id - удалить raw extract у ссылки, оставить summary/chunks",
     "/delete id - архивировать запись"
   ].join("\n");
@@ -404,6 +413,148 @@ async function saveTextItem(env, ownerId, chatId, message, originalText, classif
   });
 
   await sendMessage(env, chatId, `Сохранил: ${item.title}\nТип: ${TYPE_LABELS[item.type] || item.type}\nid: ${shortId(item.id)}\nТеги: ${item.tags.join(", ") || "без тегов"}`);
+}
+
+async function saveBookItem(env, ownerId, chatId, message, query) {
+  const cleanQuery = String(query || "").trim();
+  if (!cleanQuery) {
+    await sendMessage(env, chatId, "Какую книгу сохранить? Например: /book Дюна");
+    return;
+  }
+
+  await sendChatAction(env, chatId, "typing").catch(() => {});
+  const book = await findOpenLibraryBook(env, cleanQuery);
+  const now = new Date().toISOString();
+
+  if (!book) {
+    await saveTextItem(env, ownerId, chatId, message, cleanQuery, {
+      intent: "save",
+      type: "book",
+      title: titleFromText(cleanQuery),
+      body: cleanQuery,
+      summary: cleanQuery,
+      tags: ["книги", "прочитать"],
+      language: "ru",
+      importance: 0,
+      source: "heuristic"
+    });
+    return;
+  }
+
+  const authors = book.authors.join(", ");
+  const year = book.firstPublishYear ? ` (${book.firstPublishYear})` : "";
+  const subjectLine = book.subjects.length ? `Темы: ${book.subjects.join(", ")}` : "";
+  const body = [
+    authors ? `Автор: ${authors}` : "",
+    book.firstPublishYear ? `Первый год публикации: ${book.firstPublishYear}` : "",
+    book.isbn ? `ISBN: ${book.isbn}` : "",
+    book.openLibraryUrl ? `Open Library: ${book.openLibraryUrl}` : "",
+    subjectLine
+  ].filter(Boolean).join("\n");
+
+  const item = await createItem(env, {
+    ownerId,
+    source: "open_library",
+    telegramMessageId: message.message_id,
+    telegramChatId: String(message.chat.id),
+    type: "book",
+    title: `${book.title}${year}`,
+    body,
+    summary: [book.title, authors ? `автор: ${authors}` : "", book.firstPublishYear ? `год: ${book.firstPublishYear}` : ""].filter(Boolean).join("; "),
+    url: book.openLibraryUrl,
+    domain: "openlibrary.org",
+    canonicalUrl: book.openLibraryUrl,
+    language: book.languages[0] || "ru",
+    importance: 0,
+    metadata: {
+      provider: "open_library",
+      query: cleanQuery,
+      key: book.key,
+      cover_url: book.coverUrl,
+      authors: book.authors,
+      languages: book.languages,
+      subjects: book.subjects,
+      isbn: book.isbn
+    },
+    tags: ["книги", "прочитать", ...book.subjects.slice(0, 5)],
+    capturedAt: now,
+    createdAt: now
+  });
+
+  const coverLine = book.coverUrl ? `\nОбложка: ${book.coverUrl}` : "";
+  await sendMessage(env, chatId, `Сохранил книгу: ${item.title}\nid: ${shortId(item.id)}${authors ? `\nАвтор: ${authors}` : ""}${book.openLibraryUrl ? `\n${book.openLibraryUrl}` : ""}${coverLine}`);
+}
+
+async function saveMovieItem(env, ownerId, chatId, message, query) {
+  const cleanQuery = String(query || "").trim();
+  if (!cleanQuery) {
+    await sendMessage(env, chatId, "Какой фильм или сериал сохранить? Например: /movie Blade Runner");
+    return;
+  }
+
+  await sendChatAction(env, chatId, "typing").catch(() => {});
+  const movie = await findTmdbMovie(env, cleanQuery);
+
+  if (!movie) {
+    await saveTextItem(env, ownerId, chatId, message, cleanQuery, {
+      intent: "save",
+      type: "movie",
+      title: titleFromText(cleanQuery),
+      body: cleanQuery,
+      summary: cleanQuery,
+      tags: ["кино", "посмотреть"],
+      language: "ru",
+      importance: 0,
+      source: env.TMDB_API_KEY || env.TMDB_API_TOKEN ? "tmdb_not_found" : "heuristic"
+    });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const year = movie.releaseDate ? movie.releaseDate.slice(0, 4) : "";
+  const genreLine = movie.genres.length ? `Жанры: ${movie.genres.join(", ")}` : "";
+  const ratingLine = movie.voteAverage ? `Рейтинг TMDB: ${movie.voteAverage.toFixed(1)}` : "";
+  const body = [
+    movie.originalTitle && movie.originalTitle !== movie.title ? `Оригинальное название: ${movie.originalTitle}` : "",
+    year ? `Год: ${year}` : "",
+    genreLine,
+    ratingLine,
+    movie.overview ? `Описание: ${movie.overview}` : "",
+    movie.tmdbUrl ? `TMDB: ${movie.tmdbUrl}` : ""
+  ].filter(Boolean).join("\n");
+
+  const item = await createItem(env, {
+    ownerId,
+    source: "tmdb",
+    telegramMessageId: message.message_id,
+    telegramChatId: String(message.chat.id),
+    type: "movie",
+    title: `${movie.title}${year ? ` (${year})` : ""}`,
+    body,
+    summary: movie.overview || body || cleanQuery,
+    url: movie.tmdbUrl,
+    domain: "themoviedb.org",
+    canonicalUrl: movie.tmdbUrl,
+    language: movie.language || "ru",
+    importance: 0,
+    metadata: {
+      provider: "tmdb",
+      query: cleanQuery,
+      tmdb_id: movie.id,
+      original_title: movie.originalTitle,
+      release_date: movie.releaseDate,
+      genres: movie.genres,
+      poster_url: movie.posterUrl,
+      vote_average: movie.voteAverage,
+      vote_count: movie.voteCount
+    },
+    tags: ["кино", "посмотреть", ...movie.genres],
+    capturedAt: now,
+    createdAt: now
+  });
+
+  const posterLine = movie.posterUrl ? `\nПостер: ${movie.posterUrl}` : "";
+  await sendMessage(env, chatId, `Сохранил фильм: ${item.title}\nid: ${shortId(item.id)}${genreLine ? `\n${genreLine}` : ""}${movie.tmdbUrl ? `\n${movie.tmdbUrl}` : ""}${posterLine}`);
 }
 
 async function saveTaskItem(env, ownerId, chatId, message, originalText, options = {}) {
@@ -839,7 +990,16 @@ async function createItem(env, input) {
   ).run();
 
   await attachTags(env, input.ownerId, id, tags);
-  await insertChunks(env, input.ownerId, id, buildChunkSource(input));
+  const chunks = await insertChunks(env, input.ownerId, id, buildChunkSource(input));
+  await indexChunkRows(env, chunks.map((chunk) => ({
+    ...chunk,
+    type: ensureType(input.type),
+    title: input.title || "Без названия",
+    url: input.url || null
+  }))).catch((error) => {
+    console.error("failed to index item chunks", error);
+  });
+
   await logInteraction(env, input.ownerId, {
     message_id: input.telegramMessageId,
     chat: { id: input.telegramChatId }
@@ -878,13 +1038,26 @@ async function attachTags(env, ownerId, itemId, tags) {
 async function insertChunks(env, ownerId, itemId, sourceText) {
   const chunks = chunkText(sourceText).slice(0, MAX_CHUNKS_PER_ITEM);
   const now = new Date().toISOString();
+  const rows = [];
 
   for (let i = 0; i < chunks.length; i += 1) {
+    const id = newId("chk");
     await env.DB.prepare(`
       INSERT INTO chunks (id, item_id, owner_id, chunk_index, content, token_hint, metadata_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, '{}', ?)
-    `).bind(newId("chk"), itemId, ownerId, i, chunks[i], estimateTokens(chunks[i]), now).run();
+    `).bind(id, itemId, ownerId, i, chunks[i], estimateTokens(chunks[i]), now).run();
+    rows.push({
+      id,
+      vector_id: id,
+      item_id: itemId,
+      owner_id: ownerId,
+      chunk_index: i,
+      content: chunks[i],
+      created_at: now
+    });
   }
+
+  return rows;
 }
 
 async function insertAttachment(env, input) {
@@ -1203,10 +1376,207 @@ async function processDueReminders(env) {
   }
 }
 
+async function handleRagCommand(env, ownerId, chatId, arg) {
+  const [subcommand, maybeLimit] = String(arg || "").trim().split(/\s+/, 2);
+
+  if (!subcommand || subcommand === "status") {
+    await sendRagStatus(env, ownerId, chatId);
+    return;
+  }
+
+  if (subcommand === "reindex") {
+    const limit = Math.min(Math.max(Number(maybeLimit) || 32, 1), 100);
+    if (!hasVectorSearch(env)) {
+      await sendMessage(env, chatId, "RAG-индекс не подключён. Нужны bindings AI и VECTOR_INDEX в wrangler config.");
+      return;
+    }
+
+    const result = await reindexOwnerChunks(env, ownerId, limit);
+    await sendMessage(env, chatId, `RAG reindex: обработано ${result.indexed}/${result.total} чанков${result.failed ? `, ошибок: ${result.failed}` : ""}.`);
+    return;
+  }
+
+  await sendMessage(env, chatId, "Команды RAG: /rag status или /rag reindex [число].");
+}
+
+async function sendRagStatus(env, ownerId, chatId) {
+  const ready = hasVectorSearch(env);
+  let lines = [
+    `AI binding: ${env.AI ? "ok" : "нет"}`,
+    `Vectorize binding: ${env.VECTOR_INDEX ? "ok" : "нет"}`,
+    `Embedding model: ${embeddingModel(env)}`
+  ];
+
+  try {
+    const result = await env.DB.prepare(`
+      SELECT COALESCE(embedding_status, 'pending') AS status, COUNT(*) AS count
+      FROM chunks
+      WHERE owner_id = ?
+      GROUP BY COALESCE(embedding_status, 'pending')
+      ORDER BY status
+    `).bind(ownerId).all();
+    const rows = result.results || [];
+    if (rows.length) {
+      lines = lines.concat(rows.map((row) => `${row.status}: ${row.count}`));
+    } else {
+      lines.push("chunks: 0");
+    }
+  } catch {
+    lines.push("Статусы embeddings недоступны: примени миграцию RAG.");
+  }
+
+  lines.push(ready ? "Семантический поиск включён." : "Семантический поиск пока выключен; /ask работает через keyword search.");
+  await sendMessage(env, chatId, lines.join("\n"));
+}
+
+async function reindexOwnerChunks(env, ownerId, limit) {
+  const result = await env.DB.prepare(`
+    SELECT c.id, c.vector_id, c.item_id, c.owner_id, c.chunk_index, c.content,
+           i.type, i.title, i.url
+    FROM chunks c
+    JOIN items i ON i.id = c.item_id
+    WHERE c.owner_id = ? AND i.status = 'active'
+      AND COALESCE(c.embedding_status, 'pending') != 'indexed'
+    ORDER BY c.created_at ASC, c.chunk_index ASC
+    LIMIT ?
+  `).bind(ownerId, limit).all();
+
+  const rows = result.results || [];
+  if (!rows.length) return { total: 0, indexed: 0, failed: 0 };
+  return indexChunkRows(env, rows);
+}
+
+async function indexChunkRows(env, rows) {
+  const chunks = (rows || [])
+    .filter((row) => row?.id && String(row.content || "").trim())
+    .slice(0, MAX_VECTOR_CHUNKS_PER_BATCH);
+
+  if (!chunks.length) return { total: 0, indexed: 0, failed: 0 };
+  if (!hasVectorSearch(env)) return { total: chunks.length, indexed: 0, failed: 0 };
+
+  const model = embeddingModel(env);
+  const now = new Date().toISOString();
+
+  try {
+    const texts = chunks.map((row) => clampText(row.content, MAX_CHUNK_CHARS));
+    const embeddings = await embedTexts(env, texts);
+    const vectors = [];
+    const indexedRows = [];
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const values = embeddings[i];
+      if (!Array.isArray(values) || !values.length) continue;
+      const row = chunks[i];
+      const vector = {
+        id: row.vector_id || row.id,
+        values,
+        metadata: {
+          item_id: row.item_id,
+          owner_id: row.owner_id,
+          type: ensureType(row.type),
+          title: clampText(row.title || "", 160),
+          url: row.url || "",
+          chunk_index: Number(row.chunk_index || 0)
+        }
+      };
+      vectors.push(vector);
+      indexedRows.push({ row, vector });
+    }
+
+    if (!vectors.length) throw new Error("Embedding model returned no vectors");
+    await env.VECTOR_INDEX.upsert(vectors);
+
+    for (const indexed of indexedRows) {
+      await env.DB.prepare(`
+        UPDATE chunks
+        SET vector_id = ?, embedding_status = 'indexed', embedding_model = ?,
+            embedding_index_name = ?, embedded_at = ?, embedding_error = NULL
+        WHERE id = ?
+      `).bind(
+        indexed.vector.id,
+        model,
+        env.VECTOR_INDEX_NAME || "VECTOR_INDEX",
+        now,
+        indexed.row.id
+      ).run();
+    }
+
+    return { total: chunks.length, indexed: vectors.length, failed: chunks.length - vectors.length };
+  } catch (error) {
+    const message = clampText(error?.message || String(error), 500);
+    for (const row of chunks) {
+      await env.DB.prepare(`
+        UPDATE chunks
+        SET embedding_status = 'failed', embedding_model = ?, embedding_error = ?
+        WHERE id = ?
+      `).bind(model, message, row.id).run().catch(() => {});
+    }
+    console.error("chunk indexing failed", error);
+    return { total: chunks.length, indexed: 0, failed: chunks.length };
+  }
+}
+
+async function embedTexts(env, texts) {
+  const clean = texts.map((text) => clampText(normalizeWhitespace(text), MAX_CHUNK_CHARS));
+  if (!env.AI || !clean.length) return [];
+
+  const payload = {
+    text: clean
+  };
+  if (env.EMBEDDING_POOLING) payload.pooling = env.EMBEDDING_POOLING;
+
+  const response = await env.AI.run(embeddingModel(env), payload);
+  return Array.isArray(response?.data) ? response.data : [];
+}
+
+async function deleteVectorsForItem(env, itemId) {
+  if (!env.DB || !env.VECTOR_INDEX) return;
+
+  const result = await env.DB.prepare(`
+    SELECT COALESCE(vector_id, id) AS vector_id
+    FROM chunks
+    WHERE item_id = ?
+  `).bind(itemId).all().catch(() => ({ results: [] }));
+  const ids = (result.results || []).map((row) => row.vector_id).filter(Boolean);
+  if (!ids.length) return;
+
+  await env.VECTOR_INDEX.deleteByIds(ids).catch((error) => {
+    console.error("failed to delete vectors", error);
+  });
+}
+
+function hasVectorSearch(env) {
+  return Boolean(env.AI && env.VECTOR_INDEX);
+}
+
+function embeddingModel(env) {
+  return env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+}
+
 async function searchItems(env, ownerId, parsed) {
+  const keywordRows = await keywordSearchItems(env, ownerId, parsed);
+  const semanticRows = await semanticSearchItems(env, ownerId, parsed).catch((error) => {
+    console.error("semantic search failed", error);
+    return [];
+  });
+
+  const limit = Math.min(Math.max(Number(parsed.limit) || 8, 1), 12);
+  const merged = mergeSearchRows(keywordRows, semanticRows).slice(0, limit);
+  const tokens = tokenizeSearch(parsed.query || "").slice(0, 8);
+  const chunksByItem = await loadChunksForItems(env, merged.map((row) => row.id), tokens);
+
+  return merged.map((row) => ({
+    ...row,
+    chunks: [
+      ...(row.semanticChunks || []),
+      ...(chunksByItem[row.id] || [])
+    ].filter(Boolean).slice(0, 4)
+  }));
+}
+
+async function keywordSearchItems(env, ownerId, parsed) {
   const tokens = tokenizeSearch(parsed.query || "").slice(0, 8);
   const types = (parsed.types || []).map(ensureType).filter((type) => type && type !== "other").slice(0, 5);
-  const limit = Math.min(Math.max(Number(parsed.limit) || 8, 1), 12);
 
   const params = [ownerId];
   let sql = `
@@ -1237,13 +1607,110 @@ async function searchItems(env, ownerId, parsed) {
     return {
       ...row,
       tags,
-      score: scoreSearchRow(row, tags, tokens, types)
+      score: scoreSearchRow(row, tags, tokens, types),
+      searchSource: "keyword"
     };
   }).sort((a, b) => b.score - a.score || String(b.created_at).localeCompare(String(a.created_at)));
 
-  const top = scored.slice(0, limit);
-  const chunksByItem = await loadChunksForItems(env, top.map((row) => row.id), tokens);
-  return top.map((row) => ({ ...row, chunks: chunksByItem[row.id] || [] }));
+  return scored.slice(0, 24);
+}
+
+async function semanticSearchItems(env, ownerId, parsed) {
+  if (!hasVectorSearch(env)) return [];
+
+  const query = String(parsed.query || "").trim();
+  if (!query) return [];
+
+  const types = sanitizeTypes(parsed.types || []);
+  const queryEmbedding = await embedTexts(env, [query]);
+  const vector = queryEmbedding[0];
+  if (!vector) return [];
+
+  const matches = await env.VECTOR_INDEX.query(vector, {
+    topK: 30,
+    returnMetadata: "all"
+  });
+
+  const vectorIds = (matches.matches || []).map((match) => match.id).filter(Boolean);
+  if (!vectorIds.length) return [];
+
+  const scoreByVector = new Map((matches.matches || []).map((match) => [match.id, Number(match.score || 0)]));
+  const params = [ownerId, ...vectorIds];
+  let sql = `
+    SELECT i.id, i.owner_id, i.type, i.title, i.body, i.summary, i.url, i.domain,
+           i.metadata_json, i.search_text, i.importance, i.created_at,
+           c.id AS chunk_id, c.vector_id, c.content AS chunk_content
+    FROM chunks c
+    JOIN items i ON i.id = c.item_id
+    WHERE i.owner_id = ? AND i.status = 'active'
+      AND COALESCE(c.vector_id, c.id) IN (${vectorIds.map(() => "?").join(", ")})
+  `;
+
+  if (types.length) {
+    sql += ` AND i.type IN (${types.map(() => "?").join(", ")})`;
+    params.push(...types);
+  }
+
+  const result = await env.DB.prepare(sql).bind(...params).all();
+  const rows = result.results || [];
+  const tagsByItem = await loadTagsForItems(env, rows.map((row) => row.id));
+  const byItem = new Map();
+
+  for (const row of rows) {
+    const vectorId = row.vector_id || row.chunk_id;
+    const semanticScore = scoreByVector.get(vectorId) || 0;
+    const existing = byItem.get(row.id);
+    const tags = tagsByItem[row.id] || [];
+    if (!existing) {
+      byItem.set(row.id, {
+        id: row.id,
+        owner_id: row.owner_id,
+        type: row.type,
+        title: row.title,
+        body: row.body,
+        summary: row.summary,
+        url: row.url,
+        domain: row.domain,
+        metadata_json: row.metadata_json,
+        search_text: row.search_text,
+        importance: row.importance,
+        created_at: row.created_at,
+        tags,
+        score: 12 + semanticScore * 20 + Number(row.importance || 0),
+        searchSource: "semantic",
+        semanticChunks: row.chunk_content ? [row.chunk_content] : []
+      });
+      continue;
+    }
+
+    existing.score = Math.max(existing.score, 12 + semanticScore * 20 + Number(row.importance || 0));
+    if (row.chunk_content && existing.semanticChunks.length < 3) {
+      existing.semanticChunks.push(row.chunk_content);
+    }
+  }
+
+  return [...byItem.values()].sort((a, b) => b.score - a.score);
+}
+
+function mergeSearchRows(keywordRows, semanticRows) {
+  const byId = new Map();
+  for (const row of [...semanticRows, ...keywordRows]) {
+    const existing = byId.get(row.id);
+    if (!existing) {
+      byId.set(row.id, row);
+      continue;
+    }
+
+    existing.score = Math.max(existing.score || 0, row.score || 0) + 2;
+    existing.tags = existing.tags?.length ? existing.tags : row.tags || [];
+    existing.semanticChunks = [
+      ...(existing.semanticChunks || []),
+      ...(row.semanticChunks || [])
+    ].filter(Boolean).slice(0, 3);
+    existing.searchSource = existing.searchSource === row.searchSource ? existing.searchSource : "hybrid";
+  }
+
+  return [...byId.values()].sort((a, b) => b.score - a.score || String(b.created_at).localeCompare(String(a.created_at)));
 }
 
 async function loadTagsForItems(env, itemIds) {
@@ -1524,6 +1991,120 @@ async function extractWithTavily(env, url) {
   };
 }
 
+async function findOpenLibraryBook(env, query) {
+  const url = new URL("https://openlibrary.org/search.json");
+  url.searchParams.set("q", query);
+  url.searchParams.set("limit", "5");
+  url.searchParams.set("fields", [
+    "key",
+    "title",
+    "author_name",
+    "first_publish_year",
+    "isbn",
+    "cover_i",
+    "language",
+    "subject"
+  ].join(","));
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": buildExternalUserAgent(env)
+    }
+  }).catch(() => null);
+
+  if (!response?.ok) return null;
+  const data = await response.json().catch(() => ({}));
+  const docs = Array.isArray(data.docs) ? data.docs : [];
+  const best = docs.find((doc) => doc.title) || null;
+  if (!best) return null;
+
+  const coverUrl = best.cover_i ? `https://covers.openlibrary.org/b/id/${best.cover_i}-L.jpg` : null;
+  return {
+    key: best.key || null,
+    title: String(best.title || query).trim(),
+    authors: normalizePeople(best.author_name).slice(0, 5),
+    firstPublishYear: best.first_publish_year || null,
+    isbn: Array.isArray(best.isbn) ? best.isbn[0] || null : null,
+    coverUrl,
+    languages: Array.isArray(best.language) ? best.language.slice(0, 5) : [],
+    subjects: normalizeTags((best.subject || []).slice(0, 8)),
+    openLibraryUrl: best.key ? `https://openlibrary.org${best.key}` : null
+  };
+}
+
+async function findTmdbMovie(env, query) {
+  if (!env.TMDB_API_KEY && !env.TMDB_API_TOKEN) return null;
+
+  const searchUrl = new URL("https://api.themoviedb.org/3/search/movie");
+  searchUrl.searchParams.set("query", query);
+  searchUrl.searchParams.set("include_adult", "false");
+  searchUrl.searchParams.set("language", env.TMDB_LANGUAGE || "ru-RU");
+  searchUrl.searchParams.set("page", "1");
+  applyTmdbApiKey(env, searchUrl);
+
+  const searchResponse = await fetch(searchUrl.toString(), {
+    headers: buildTmdbHeaders(env)
+  }).catch(() => null);
+  if (!searchResponse?.ok) return null;
+
+  const searchData = await searchResponse.json().catch(() => ({}));
+  const result = Array.isArray(searchData.results) ? searchData.results.find((item) => item?.id) : null;
+  if (!result) return null;
+
+  const detailsUrl = new URL(`https://api.themoviedb.org/3/movie/${result.id}`);
+  detailsUrl.searchParams.set("language", env.TMDB_LANGUAGE || "ru-RU");
+  applyTmdbApiKey(env, detailsUrl);
+
+  const detailsResponse = await fetch(detailsUrl.toString(), {
+    headers: buildTmdbHeaders(env)
+  }).catch(() => null);
+  const details = detailsResponse?.ok ? await detailsResponse.json().catch(() => ({})) : {};
+  const merged = { ...result, ...details };
+  const posterPath = merged.poster_path || result.poster_path || "";
+
+  return {
+    id: merged.id,
+    title: merged.title || result.title || query,
+    originalTitle: merged.original_title || result.original_title || "",
+    overview: merged.overview || result.overview || "",
+    releaseDate: merged.release_date || result.release_date || "",
+    language: merged.original_language || result.original_language || null,
+    genres: Array.isArray(merged.genres) ? merged.genres.map((genre) => genre.name).filter(Boolean).slice(0, 8) : [],
+    voteAverage: Number(merged.vote_average || result.vote_average || 0),
+    voteCount: Number(merged.vote_count || result.vote_count || 0),
+    posterUrl: posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : null,
+    tmdbUrl: merged.id ? `https://www.themoviedb.org/movie/${merged.id}` : null
+  };
+}
+
+function applyTmdbApiKey(env, url) {
+  if (env.TMDB_API_TOKEN) return;
+  const key = env.TMDB_API_KEY || "";
+  if (key && !looksLikeBearerToken(key)) {
+    url.searchParams.set("api_key", key);
+  }
+}
+
+function buildTmdbHeaders(env) {
+  const headers = { "Accept": "application/json" };
+  const token = env.TMDB_API_TOKEN || env.TMDB_API_KEY || "";
+  if (looksLikeBearerToken(token) || env.TMDB_API_TOKEN) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+function looksLikeBearerToken(value) {
+  const token = String(value || "");
+  return token.startsWith("ey") || token.split(".").length >= 3;
+}
+
+function buildExternalUserAgent(env) {
+  const contact = env.OPENLIBRARY_CONTACT_EMAIL || env.BOT_CONTACT_EMAIL || "no-contact-configured@example.invalid";
+  return `second-brain-bot/0.1 (${contact})`;
+}
+
 async function sendRecent(env, ownerId, chatId) {
   const result = await env.DB.prepare(`
     SELECT id, type, title, summary, url, created_at
@@ -1592,6 +2173,7 @@ async function archiveItemByPrefix(env, ownerId, chatId, prefix) {
   await env.DB.prepare(`
     UPDATE items SET status = 'archived', updated_at = ? WHERE id = ? AND owner_id = ?
   `).bind(new Date().toISOString(), rows[0].id, ownerId).run();
+  await deleteVectorsForItem(env, rows[0].id);
 
   await sendMessage(env, chatId, `Архивировал: ${rows[0].title}`);
 }
@@ -1904,6 +2486,7 @@ function withTypeTags(type, tags) {
   const base = normalizeTags(tags);
   const additions = [];
   if (type === "movie") additions.push("кино", "посмотреть");
+  if (type === "book") additions.push("книги", "прочитать");
   if (type === "recipe") additions.push("рецепты", "еда");
   if (type === "link") additions.push("ссылки");
   if (type === "thought") additions.push("мысли");
@@ -2172,6 +2755,11 @@ function normalizeTags(tags) {
     .filter((tag) => tag.length >= 2 && tag.length <= 40);
 
   return [...new Set(clean)].slice(0, 14);
+}
+
+function normalizePeople(values) {
+  const array = Array.isArray(values) ? values : String(values || "").split(/[,;]+/);
+  return [...new Set(array.map((value) => String(value || "").replace(/\s+/g, " ").trim()).filter(Boolean))];
 }
 
 function sanitizeTypes(types) {

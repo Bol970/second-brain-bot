@@ -14,13 +14,27 @@
     ]
   },
   "vars": {
-    "BOT_DISPLAY_NAME": "<BOT_DISPLAY_NAME>"
+    "BOT_DISPLAY_NAME": "<BOT_DISPLAY_NAME>",
+    "TMDB_LANGUAGE": "ru-RU",
+    "VECTOR_INDEX_NAME": "<VECTOR_INDEX_NAME>",
+    "EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
+    "OPENLIBRARY_CONTACT_EMAIL": "<OPENLIBRARY_CONTACT_EMAIL>"
+  },
+  "ai": {
+    "binding": "AI",
+    "remote": true
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "second_brain",
       "database_id": "<D1_DATABASE_ID>"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTOR_INDEX",
+      "index_name": "<VECTOR_INDEX_NAME>"
     }
   ],
   "r2_buckets": [
