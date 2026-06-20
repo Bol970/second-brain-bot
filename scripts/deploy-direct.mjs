@@ -3,6 +3,18 @@ import { loadDotEnv } from "./load-env.mjs";
 
 await loadDotEnv();
 
+// In sandboxed/proxied environments global fetch (undici) ignores HTTPS_PROXY,
+// which makes API calls hang. Route them through the proxy when one is set.
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+if (proxyUrl) {
+  try {
+    const { ProxyAgent, setGlobalDispatcher } = await import("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  } catch {
+    // undici not available; fall back to direct connection
+  }
+}
+
 const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
 const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 const scriptName = process.env.WORKER_NAME || "second-brain-bot";
